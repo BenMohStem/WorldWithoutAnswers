@@ -1,0 +1,5 @@
+bin_obj/
+bin_exe/
+*.o
+*.exe
+res/logs/
