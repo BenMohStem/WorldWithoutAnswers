@@ -14,19 +14,17 @@
 #define FORGE_ST_FAILED  5
 #define FORGE_ST_CUT     6   /* rebuilt, output identical (early cutoff) */
 
-/* --- research evidence hierarchy --- */
-#define WWA_ER_LEVEL_A 0  /* mathematically/mechanically obvious invariant from code/architecture */
+/* --- research evidence hierarchy (ranked weakest..strongest claim support) --- */
+#define WWA_ER_LEVEL_A 0  /* mechanically obvious invariant from code/architecture */
 #define WWA_ER_LEVEL_B 1  /* compiler-verified property or generated-code inspection */
-#define WWA_ER_LEVEL_B 2  /* microbenchmark result */
-#define WWA_ER_LEVEL_B 3  /* integrated benchmark result */
-#define WWA_ER_LEVEL_B 4  /* profile/counter evidence */
-#define WWA_ER_LEVEL_B 5  /* external paper/production precedent */
-#define WWA_ER_LEVEL_B 6  /* untested hypothesis/intuition */
-#define WWA_ER_LEVEL_C 7  /* repeatable microbenchmark result */
-#define WWA_ER_LEVEL_D 8  /* repeatable integrated benchmark result */
-#define WWA_ER_LEVEL_E 9  /* profile/counter evidence explaining result */
-#define WWA_ER_LEVEL_F 10 /* external paper/production precedent */
-#define WWA_ER_LEVEL_G 11 /* untested hypothesis/intuition */
+#define WWA_ER_LEVEL_C 2  /* repeatable microbenchmark result */
+#define WWA_ER_LEVEL_D 3  /* repeatable integrated benchmark result */
+#define WWA_ER_LEVEL_E 4  /* profile/counter evidence explaining the result */
+#define WWA_ER_LEVEL_F 5  /* external paper / production precedent */
+#define WWA_ER_LEVEL_G 6  /* untested hypothesis / intuition */
+
+/* Highest evidence level any promoted forge claim currently rests on. */
+#define WWA_RESEARCH_LEVEL WWA_ER_LEVEL_D
 
 #if defined(__GNUC__) || defined(__clang__)
 typedef __builtin_va_list va_list;
@@ -40,18 +38,6 @@ typedef __builtin_va_list va_list;
 #error "stdarg: no varargs support for this compiler"
 #endif
 
-/* Research evidence tracking */
-#define WWA_RESEARCH_LEVEL WWA_ER_LEVEL_D
-
-/* Evidence hierarchy definitions */
-#define WWA_ER_LEVEL_A 0  /* mathematically/mechanically obvious invariant from code/architecture */
-#define WWA_ER_LEVEL_B 1  /* compiler-verified property or generated-code inspection */
-#define WWA_ER_LEVEL_C 2  /* repeatable microbenchmark result */
-#define WWA_ER_LEVEL_D 3  /* repeatable integrated benchmark result */
-#define WWA_ER_LEVEL_E 4  /* profile/counter evidence explaining result */
-#define WWA_ER_LEVEL_F 6  /* untested hypothesis/intuition */
-#define WWA_ER_LEVEL_G 7  /* another untested hypothesis level */
-/* NOTE: #endif moved to end of file (line 106) */
 typedef struct forge_node {
     char*  out;
     u64    out_hash;      /* path hash */
@@ -78,18 +64,25 @@ struct forge_graph {
     usize         map_cap;
 };
 
-/* --- manifest (forge_manifest.c) --- */
+/* --- manifest (forge_manifest.c) ---
+   sig_hash is the *build signature* a command node was produced from:
+   mix(cmd_hash, content hash of every dependency in declaration order).
+   Recording the signature — not the dependency hashes themselves — is what
+   makes the up-to-date check sound: a dependency rewrites its own record
+   during the same pass, so comparing against the dependency's record can
+   never detect a change (it always sees the new value). Source nodes leave
+   sig_hash at 0. */
 typedef struct {
     u64 path_hash;
     u64 content_hash;
-    u64 cmd_hash;
+    u64 sig_hash;
     i64 mtime;
     i64 size;
 } forge_manifest_rec_t;
 
 void forge_manifest_load(void);
 void forge_manifest_append(const char* path, u64 path_hash,
-                           u64 content_hash, u64 cmd_hash,
+                           u64 content_hash, u64 sig_hash,
                            i64 mtime, i64 size);
 /* lookup: fills rec, returns 1 if found (latest record wins) */
 i32  forge_manifest_get(u64 path_hash, forge_manifest_rec_t* rec);
@@ -101,5 +94,6 @@ void forge_manifest_compact(void);
 /* --- scheduler (forge_sched.c) --- */
 i32 forge_sched_run(forge_graph_t* g, i32 workers);
 extern f64 g_forge_build_ms;
+extern i32 g_forge_n_built, g_forge_n_cut, g_forge_n_clean, g_forge_n_failed;
 
 #endif

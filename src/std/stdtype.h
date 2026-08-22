@@ -61,54 +61,12 @@ typedef __PTRDIFF_TYPE__ ptrdiff_t;
 #define WWA_OFFSETOF(type, member) ((usize)((char_t*)&(((type*)0)->member) - (char_t*)0))
 #endif
 
+/* Numeric bounds of the quantized formats. The conversions themselves live in
+   stdfloat.h / stdfloat.c, which perform real exponent/mantissa re-encoding. */
 #define F16_MAX       65504.0f
 #define F16_MIN       (1.0f / 65504.0f)
 #define F8_MAX        16.0f
 #define F8_MIN        (1.0f / 16.0f)
-
-/* Proper union-based float16<->float32 conversion (NVIDIA FP16: e5m10) */
-typedef union {
-    f32 f32;
-    u16 u16;
-} wwa_f16_conv_t;
-
-#define F16_FROM_F32(f) (    \
-    (wwa_f16_conv_t){.f32 = (f)}.u16  \
-)
-
-#define F32_FROM_F16(i) (    \
-    (wwa_f16_conv_t){.u16 = (i)}.f32  \
-)
-
-/* Proper union-based float8<->float32 conversion (NVIDIA FP8 variants) */
-/* FP8 E5M2: 5 exponent bits, 2 mantissa bits, bias 15 */
-typedef union {
-    f32 f32;
-    u8  u8;
-} wwa_f8_e5m2_conv_t;
-
-/* FP8 E4M3: 4 exponent bits, 3 mantissa bits, bias 7 */
-typedef union {
-    f32 f32;
-    u8  u8;
-} wwa_f8_e4m3_conv_t;
-
-#define F8_E5M2_FROM_F32(f) (    \
-    (wwa_f8_e5m2_conv_t){.f32 = (f)}.u8  \
-)
-
-#define F32_FROM_F8_E5M2(i) (    \
-    (wwa_f8_e5m2_conv_t){.u8 = (i)}.f32  \
-)
-
-/* FP8 E4M3 FROM F32 */
-#define F8_E4M3_FROM_F32(f) (    \
-    (wwa_f8_e4m3_conv_t){.f32 = (f)}.u8  \
-)
-
-#define F32_FROM_F8_E4M3(i) (    \
-    (wwa_f8_e4m3_conv_t){.u8 = (i)}.f32  \
-)
 
 typedef wwa_i8   int8_t;
 typedef wwa_u8   uint8_t;

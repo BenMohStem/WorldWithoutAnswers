@@ -13,7 +13,6 @@
 
 /* function prototypes */
 i32 cmd_selftest(void);
-i32 cmd_bench(i32 warm);
 
 #define OBJ "bin_obj/windows/release/obj"
 #define EXE "bin_exe/windows/release"
@@ -268,11 +267,14 @@ i32 cmd_selftest(void) {
             wwa_printf("FAIL: manifest get for stdio.c not found or empty\n");
         }
 
-        /* Test latest-record-wins: append same path with different content_hash */
-        u64 h2 = wwa_hash_str("src/std/stdio.c");
-        forge_manifest_append("src/std/stdio.c", h2, 0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFll, 0, 100, 42);
+        /* Test latest-record-wins. Uses a synthetic path so the selftest never
+           writes a bogus record for a real source file into the manifest. */
+        const char* probe = "wwa://selftest/latest-record-wins";
+        u64 h2 = wwa_hash_str(probe);
+        forge_manifest_append(probe, h2, 0xC0FFEEull, 0, 100, 42);
+        forge_manifest_append(probe, h2, 0xDEADBEEFDEADBEEFull, 0, 100, 42);
         i32 found2 = forge_manifest_get(h2, &rec);
-        if (found2 && rec.content_hash == 0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFll) {
+        if (found2 && rec.content_hash == 0xDEADBEEFDEADBEEFull) {
             passes++;
             wwa_printf("PASS: manifest latest-record-wins test\n");
         } else {
@@ -316,27 +318,88 @@ i32 cmd_selftest(void) {
         forge_graph_free(g);
     }
 
-    /* --- 4. Build integrity: clean build result --- */
+    /* --- 4. Build integrity: a warm build must execute nothing --- */
     {
         i32 res = cmd_build(1);
-        if (res == 0) {
-            /* Run warm build (should be all clean) */
-            i32 warm = cmd_build(1);
-            /* warm is already printed by forge, just check it completed */
-            passes++;
-            wwa_printf("PASS: build + warm build completed\n");
-        } else {
+        if (res != 0) {
             fails++;
             wwa_printf("FAIL: initial build failed\n");
+        } else if (cmd_build(1) != 0 ||
+                   g_forge_n_built != 0 || g_forge_n_cut != 0) {
+            fails++;
+            wwa_printf("FAIL: warm build re-executed %d nodes (%d cut)\n",
+                       g_forge_n_built, g_forge_n_cut);
+        } else {
+            passes++;
+            wwa_printf("PASS: build converges — warm build executes nothing\n");
+        }
+    }
+
+    /* --- 5. Incrementality: an edited input must be rebuilt ---
+       Regression test for the staleness bug where up-to-dateness was decided
+       by comparing a dependency against its own manifest record: the record
+       had already been rewritten in the same pass, so edits were invisible
+       and stale objects were silently linked. Runs on a throwaway 2-node
+       graph (source -> object) so no project file is touched. */
+    {
+        const char* dir = "bin_obj/selftest";
+        const char* src = "bin_obj/selftest/incr.c";
+        const char* obj = "bin_obj/selftest/incr.o";
+        wwa_os_dir_create("bin_obj");
+        wwa_os_dir_create(dir);
+        wwa_os_file_delete(obj);
+
+        const char* argv[8];
+        i32 argc = 0;
+        argv[argc++] = g_cc;
+        argv[argc++] = "-c";
+        argv[argc++] = "-O0";
+        argv[argc++] = "-fno-builtin";
+        argv[argc++] = src;
+        argv[argc++] = "-o";
+        argv[argc++] = obj;
+
+        i32 built_first = -1, built_warm = -1, built_edit = -1;
+        for (i32 pass = 0; pass < 3; pass++) {
+            if (pass != 1) {
+                const char* body = pass == 0 ? "int wwa_incr(void){return 1;}\n"
+                                             : "int wwa_incr(void){return 2;}\n";
+                i32 fd = wwa_os_file_open(src, WWA_OS_FILE_WRITE |
+                                               WWA_OS_FILE_CREATE |
+                                               WWA_OS_FILE_TRUNC);
+                if (fd < 0) break;
+                wwa_os_write(fd, body, wwa_strlen(body));
+                wwa_os_file_close(fd);
+            }
+            forge_graph_t* g = forge_graph_create();
+            const char* deps[1] = { src };
+            forge_add_node(g, obj, deps, 1, argv, argc);
+            forge_graph_check(g);
+            forge_graph_critical_path(g);
+            forge_sched_run(g, 1);
+            forge_graph_free(g);
+            /* count executions, not output changes: re-running the test
+               reproduces a byte-identical object, which forge reports as an
+               early cutoff rather than a build */
+            i32 executed = g_forge_n_built + g_forge_n_cut;
+            if (pass == 0) built_first = executed;
+            else if (pass == 1) built_warm = executed;
+            else built_edit = executed;
+        }
+        wwa_os_file_delete(obj);
+        wwa_os_file_delete(src);
+
+        if (built_first >= 1 && built_warm == 0 && built_edit >= 1) {
+            passes++;
+            wwa_printf("PASS: edited source triggers rebuild, unedited does not\n");
+        } else {
+            fails++;
+            wwa_printf("FAIL: incrementality (first=%d warm=%d edited=%d)\n",
+                       built_first, built_warm, built_edit);
         }
     }
 
     /* --- Summary --- */
     wwa_printf("\nforged selftest: passes=%d fails=%d\n", passes, fails);
     return (fails == 0) ? 0 : 1;
-}
-
-i32 cmd_bench(i32 warm) {
-    wwa_printf("bench: not yet implemented (would benchmark cold/warm builds)\n");
-    return 0;
 }

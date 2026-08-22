@@ -1,6 +1,6 @@
 /* World Without Answers — forge_manifest.c
    Append-only content-hash database (ninja_log / tup style).
-   Record: [path_hash u64][content_hash u64][cmd_hash u64][mtime i64][size i64]
+   Record: [path_hash u64][content_hash u64][sig_hash u64][mtime i64][size i64]
    Latest record per path wins. Fast path: if mtime+size match the
    stored record, reuse stored content hash without re-reading
    (CloudBuild-style trust after verification). */
@@ -9,6 +9,7 @@
 #include <stdstr.h>
 #include <stdos.h>
 #include <stdhash.h>
+#include <stdthread.h>
 #include <stdio.h>
 
 #define FORGE_MANIFEST_PATH "bin_obj/forge_manifest.bin"
@@ -19,9 +20,11 @@ typedef struct {
     usize count, cap;
 } forge_db_t;
 
-static forge_db_t g_db;
+static forge_db_t    g_db;
+static wwa_mutex_t   g_db_mtx;   /* build workers query/append concurrently */
 
 void forge_manifest_load(void) {
+    wwa_mutex_init(&g_db_mtx);
     wwa_memset(&g_db, 0, sizeof(g_db));
     g_db.cap = 4096;
     g_db.recs = (forge_manifest_rec_t*)wwa_os_alloc(
@@ -61,23 +64,28 @@ void forge_manifest_load(void) {
 
 /* linear scan from end — fine for <100k records; map later if needed */
 i32 forge_manifest_get(u64 path_hash, forge_manifest_rec_t* rec) {
+    i32 found = 0;
+    wwa_mutex_lock(&g_db_mtx);
     for (usize i = g_db.count; i > 0; i--) {
         if (g_db.recs[i-1].path_hash == path_hash) {
             *rec = g_db.recs[i-1];
-            return 1;
+            found = 1;
+            break;
         }
     }
-    return 0;
+    wwa_mutex_unlock(&g_db_mtx);
+    return found;
 }
 
 i32 forge_manifest_dbg_count(void) { return (i32)g_db.count; }
 u64 forge_manifest_dbg_rec0(void) { return g_db.count ? g_db.recs[0].path_hash : 0; }
 
 void forge_manifest_append(const char* path, u64 path_hash,
-                           u64 content_hash, u64 cmd_hash,
+                           u64 content_hash, u64 sig_hash,
                            i64 mtime, i64 size)
 {
     (void)path;
+    wwa_mutex_lock(&g_db_mtx);
     if (g_db.count >= g_db.cap) {
         usize ncap = g_db.cap ? g_db.cap * 2 : 4096;
         forge_manifest_rec_t* nr = (forge_manifest_rec_t*)wwa_os_alloc(
@@ -89,7 +97,7 @@ void forge_manifest_append(const char* path, u64 path_hash,
     forge_manifest_rec_t rec;
     rec.path_hash = path_hash;
     rec.content_hash = content_hash;
-    rec.cmd_hash = cmd_hash;
+    rec.sig_hash = sig_hash;
     rec.mtime = mtime;
     rec.size = size;
     g_db.recs[g_db.count++] = rec;
@@ -97,22 +105,33 @@ void forge_manifest_append(const char* path, u64 path_hash,
     /* append to disk */
     i32 fd = wwa_os_file_open(FORGE_MANIFEST_PATH,
         WWA_OS_FILE_WRITE | WWA_OS_FILE_CREATE | WWA_OS_FILE_APPEND);
-    if (fd < 0) return;
-    if (wwa_os_file_size(FORGE_MANIFEST_PATH) == 0) {
-        u64 magic = FORGE_MANIFEST_MAGIC;
-        wwa_os_write(fd, &magic, 8);
+    if (fd >= 0) {
+        if (wwa_os_file_size(FORGE_MANIFEST_PATH) == 0) {
+            u64 magic = FORGE_MANIFEST_MAGIC;
+            wwa_os_write(fd, &magic, 8);
+        }
+        wwa_os_write(fd, &rec, sizeof(rec));
+        wwa_os_file_close(fd);
     }
-    wwa_os_write(fd, &rec, sizeof(rec));
-    wwa_os_file_close(fd);
+    wwa_mutex_unlock(&g_db_mtx);
 }
+
+/* Filesystem timestamps are only as fine as the clock that stamped them
+   (~15.6 ms on NTFS). A file written within that window of being hashed can
+   receive the same stamp as the version we recorded, so a same-size edit
+   would be invisible. Treat such records as "racily clean" (git's term) and
+   always re-read them. */
+#define FORGE_MTIME_RACE_US 100000ll
 
 /* stat fast-path: reuse stored hash when mtime+size unchanged */
 u64 forge_manifest_file_hash(const char* path) {
     u64 ph = wwa_hash_str(path);
     i64 mtime = wwa_os_file_mtime(path);
     i64 size = wwa_os_file_size(path);
+    i64 now = (i64)wwa_os_time_us();
     forge_manifest_rec_t rec;
-    if (mtime >= 0 && forge_manifest_get(ph, &rec) &&
+    if (mtime >= 0 && now - mtime > FORGE_MTIME_RACE_US &&
+        forge_manifest_get(ph, &rec) &&
         rec.mtime == mtime && rec.size == size && rec.content_hash != 0) {
         return rec.content_hash; /* trusted fast path */
     }

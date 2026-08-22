@@ -140,3 +140,20 @@ void wwa_memset_explicit(void_p dst, i32 c, usize n) {
     volatile u8* p = (volatile u8*)dst;
     while (n--) *p++ = (u8)c;
 }
+
+/* --- freestanding ABI shims ---------------------------------------------
+   Even with -fno-builtin and -nostdlib, GCC/Clang may emit calls to the four
+   memory routines the C ABI reserves for them (aggregate copies, struct
+   initialisation, large stack clears). Nothing else in WWA links libc, so the
+   std layer owns those symbols too; they are thin forwarders, never loops, so
+   no compiler can re-recognise them into a call to themselves. */
+
+void_p memcpy(void_p dst, const void* src, usize n);
+void_p memmove(void_p dst, const void* src, usize n);
+void_p memset(void_p dst, i32 c, usize n);
+i32    memcmp(const void* a, const void* b, usize n);
+
+void_p memcpy(void_p dst, const void* src, usize n)  { return wwa_memcpy(dst, src, n); }
+void_p memmove(void_p dst, const void* src, usize n) { return wwa_memmove(dst, src, n); }
+void_p memset(void_p dst, i32 c, usize n)            { return wwa_memset(dst, c, n); }
+i32    memcmp(const void* a, const void* b, usize n) { return wwa_memcmp(a, b, n); }

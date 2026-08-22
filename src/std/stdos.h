@@ -57,6 +57,10 @@ i32 wwa_os_round_f32_to_f8(f8* out, f32 f);
 i32 wwa_os_round_f16_to_f32(f32* out, f16 i);
 i32 wwa_os_round_f8_to_f32(f32* out, f8 i);
 i32      wwa_os_file_exists(const char_t* path);
+/* modification time in microseconds since the Unix epoch (same clock as
+   wwa_os_time_us), -1 when the file cannot be stat'd. Sub-second precision
+   matters: whole-second stamps let two edits inside one second look
+   identical to an incremental builder. */
 i64      wwa_os_file_mtime(const char_t* path);
 i64      wwa_os_file_size(const char_t* path);
 i32      wwa_os_dir_create(const char_t* path);

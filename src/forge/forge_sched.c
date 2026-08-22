@@ -12,9 +12,12 @@
 #include <stdos.h>
 #include <stdthread.h>
 #include <stdtime.h>
+#include <stdhash.h>
 #include <stdio.h>
 
 f64 g_forge_build_ms = 0;
+/* stats of the last forge_sched_run, for selftests and reporting */
+i32 g_forge_n_built = 0, g_forge_n_cut = 0, g_forge_n_clean = 0, g_forge_n_failed = 0;
 
 typedef struct {
     forge_graph_t* g;
@@ -33,18 +36,19 @@ static void forge_status(forge_sched_t* s, const char* verb, const char* path) {
     wwa_printf("[%d/%d] %s %s\n", s->executed, s->total, verb, path);
 }
 
-static i32 forge_deps_unchanged(forge_sched_t* s, forge_node_t* n) {
-    forge_manifest_rec_t drec;
+/* Build signature of a command node: its command line mixed with the
+   content hash every dependency has in this pass. Dependencies are all
+   final before the node is scheduled, so the value is stable here.
+   Returns 0 when a dependency produced nothing (missing/failed upstream),
+   which never equals a recorded signature and therefore forces a rebuild. */
+static u64 forge_node_sig(forge_sched_t* s, const forge_node_t* n) {
+    u64 sig = wwa_hash_mix(WWA_HASH_SEED, n->cmd_hash);
     for (i32 k = 0; k < n->dep_count; k++) {
-        forge_node_t* d = &s->g->nodes[n->deps[k]];
-        /* dep's current-pass value */
-        u64 cur = d->new_hash;
-        if (cur == 0) return 0; /* dep produced nothing / failed upstream */
-        /* what this node last saw for dep */
-        if (!forge_manifest_get(d->out_hash, &drec)) return 0;
-        if (drec.content_hash != cur) return 0;
+        u64 cur = s->g->nodes[n->deps[k]].new_hash;
+        if (cur == 0) return 0;
+        sig = wwa_hash_mix(sig, cur);
     }
-    return 1;
+    return sig ? sig : 1;
 }
 
 static void forge_mkdirs(const char* path) {
@@ -137,31 +141,15 @@ static i32 forge_process(forge_sched_t* s, forge_node_t* n) {
         return FORGE_ST_BUILT;
     }
 
-    /* --- command node: try to skip --- */
-    if (have_orec && orec.cmd_hash == n->cmd_hash && orec.content_hash != 0 &&
+    /* --- command node: skip when the recorded signature still holds --- */
+    u64 sig = forge_node_sig(s, n);
+    if (have_orec && sig != 0 && orec.sig_hash == sig && orec.content_hash != 0 &&
         wwa_os_file_exists(n->out)) {
         u64 out_now = forge_manifest_file_hash(n->out); /* stat fast path */
-        if (out_now == orec.content_hash && forge_deps_unchanged(s, n)) {
+        if (out_now == orec.content_hash) {
             n->new_hash = out_now;
             return FORGE_ST_CLEAN;
         }
-        wwa_printf("forge: rebuild %s (out=%d deps=%d)\n", n->out,
-                   out_now == orec.content_hash ? 1 : 0,
-                   forge_deps_unchanged(s, n));
-    } else if (n->argv) {
-        static i32 dbg_done = 0;
-        if (!dbg_done) {
-            dbg_done = 1;
-            wwa_printf("forge: dbcount=%d rec0=%016llx query=%016llx (%s)\n",
-                       forge_manifest_dbg_count(),
-                       (unsigned long long)forge_manifest_dbg_rec0(),
-                       (unsigned long long)n->out_hash, n->out);
-        }
-        wwa_printf("forge: rebuild %s (orec=%d cmd=%d chash=%d exists=%d)\n",
-                   n->out, have_orec,
-                   have_orec ? orec.cmd_hash == n->cmd_hash : -1,
-                   have_orec ? orec.content_hash != 0 : -1,
-                   wwa_os_file_exists(n->out));
     }
 
     /* --- rebuild --- */
@@ -177,7 +165,7 @@ static i32 forge_process(forge_sched_t* s, forge_node_t* n) {
     u64 out_new = forge_manifest_file_hash(n->out); /* full rehash (mtime moved) */
     n->new_hash = out_new;
     i64 mt = wwa_os_file_mtime(n->out);
-    forge_manifest_append(n->out, n->out_hash, out_new, n->cmd_hash, mt,
+    forge_manifest_append(n->out, n->out_hash, out_new, sig, mt,
                           wwa_os_file_size(n->out));
 
     /* early cutoff: value identical to what dependents last consumed */
@@ -296,6 +284,10 @@ i32 forge_sched_run(forge_graph_t* g, i32 workers) {
         wwa_mutex_unlock(&s.mtx);
     }
     g_forge_build_ms = (wwa_time_us() - t0) / 1000.0;
+    g_forge_n_built = s.n_built;
+    g_forge_n_cut = s.n_cut;
+    g_forge_n_clean = s.n_clean;
+    g_forge_n_failed = s.failed;
 
     wwa_mutex_destroy(&s.mtx);
     wwa_cond_destroy(&s.cv);

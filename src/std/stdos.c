@@ -586,11 +586,11 @@ i64 wwa_os_file_mtime(const char_t* path) {
     u64 ft;
     if (!GetFileAttributesExA(path, 0, info)) return -1;
     ft = ((u64)info[6] << 32) | info[5];
-    return (i64)(ft / 10000000ull) - 11644473600ll;
+    return (i64)((ft - 116444736000000000ull) / 10ull);
 #else
     u64 st[18];
     if (wwa_linux_syscall4(WWA_LINUX_SYS_NEWFSTATAT, -100, (i64)path, (i64)st, 0) != 0) return -1;
-    return (i64)((i64*)st)[11];
+    return ((i64*)st)[11] * 1000000ll + ((i64*)st)[12] / 1000ll;
 #endif
 }
 

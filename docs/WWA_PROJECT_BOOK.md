@@ -6,6 +6,16 @@
 
 ## Architecture Layers
 
+### 0. Freestanding ABI contract
+
+The project links with `-nostdlib`, but a C compiler may still emit calls to
+`memcpy`, `memmove`, `memset` and `memcmp` for aggregate copies, struct
+initialisation and large stack clears — `-fno-builtin` does not remove that
+requirement. `src/std/stdmem.c` therefore owns those four names as one-line
+forwarders to the `wwa_*` implementations. They are the only libc-spelled
+symbols in the tree, and they contain no loops, so no compiler can recognise
+them into a call to themselves.
+
 ### 1. From-Scratch C Standard Library (`src/std/`)
 
 A complete C standard library implementation with 22+ headers, all self-contained with no 3rd-party dependencies. Contains 340,375 self-test checks with 0 failures.
@@ -34,16 +44,20 @@ A complete C standard library implementation with 22+ headers, all self-containe
 **Key Algorithms:**
 - **Kahn's algorithm** for cycle detection — O(V+E) guarantee
 - **Graham's list scheduling** with critical-path prioritization — makespan ≤ (2 - 1/m) · OPT
+- **Verifying traces** — every command node records the *build signature* it was produced from, `mix(cmd_hash, content hashes of all dependencies)`; it is up to date iff that signature still holds and its output still hashes to the recorded value. Validating against the recorded trace rather than against the dependencies' current records is what makes the check sound (see `docs/research/2026-08-forge-incrementality.md`)
 - **Early cutoff** via append-only manifest DB — if output hash unchanged, dependents not dirtied
 - **Value-equality short-circuit** — after rebuild, if content_hash unchanged in manifest, skip dependent propagation
-- **Manifest format**: append-only binary DB with magic "FORGEMAN", records `[path_hash u64][content_hash u64][cmd_hash u64][mtime i64][size i64]`
+- **Manifest format**: append-only binary DB with magic "FORGEMAN", records `[path_hash u64][content_hash u64][sig_hash u64][mtime i64][size i64]`; latest record per path wins, and the DB is mutex-guarded because all build workers query and append concurrently
+- **Racily-clean guard** — the `(mtime, size)` fast path is refused for files modified within 100 ms of the check, because a filesystem stamp is only as fine as the clock that wrote it (~15.6 ms on NTFS). `wwa_os_file_mtime` returns microseconds, not whole seconds, for the same reason
 
 **Build Graph**: 58 nodes comprising 15 std src files, 7 engine src files, 3 forge internal files, and 5 target executables (wwa_main, wwa_demo, wwa_demo_window, std_selftest, std_bench, forge self-hosting).
 
 **Performance Results:**
-- Cold build: ~14-21s
-- Warm no-op: 58/58 clean in 6ms (1 obj + 0 links rebuilt)
-- Incremental touch-one-file: 1 obj + 6 links rebuilt
+- Cold build: 58/58 executed, ~4.1s (16 workers, GCC 16.1)
+- Warm no-op: 58/58 clean, 0 executed, 1.6-17ms
+- Incremental edit-one-std-source: 8 executed (1 obj + 7 links), ~2.6s
+
+**Invariants under test (`forge selftest`, 6/6):** manifest lookup, latest-record-wins, cycle detection, project node count, *warm build executes nothing*, and *an edited source is rebuilt while an untouched one is not* — the last two are regression tests for the staleness defect described in the iteration note.
 - Manifest records grow from 48 bytes to 4688+ across runs
 
 ### 3. Engine Subsystems (`src/engine/`)
@@ -235,8 +249,8 @@ forge run wwa_demo_window
 # Selftest (verifies all invariants)
 forge selftest
 
-# Benchmark cold/warm/incremental
-forge bench
+# Benchmark the std layer (forge bench is not implemented yet)
+forge run std_bench
 ```
 
 ### Running the Playable Demo
@@ -262,6 +276,14 @@ The demo opens a 1280×720 window with:
 
 WWA is 100% from-scratch: no libc, no CMake, no Makefile, no 3rd-party libs. Every line of code is owned and auditable.
 
+## Iteration Notes
+
+- `docs/research/2026-08-forge-incrementality.md` — forge was linking stale
+  objects (up-to-dateness compared each dependency against a record the
+  dependency had already overwritten in the same pass); fixed with recorded
+  build signatures, microsecond mtimes, a racily-clean guard, a mutex on the
+  manifest, and two regression tests.
+
 ## Research References (Papers That Informed This Project)
 
 1. **NVIDIA FP8 Formats** (2022) — E5M2 and E4M3 dynamic range analysis
@@ -271,6 +293,10 @@ WWA is 100% from-scratch: no libc, no CMake, no Makefile, no 3rd-party libs. Eve
 5. **Mixed-Precision Training** (NVIDIA, 2018) — FP16/BF18 numerical stability
 6. **Content-Addressed Storage** (Ousterhout, 1994) — Tarpit/shelf design principles
 7. **Append-Only File Systems** (Killian et al., 1993) — Crash safety guarantees
+8. **Build Systems à la Carte** (Mokhov, Mitchell, Peyton Jones, ICFP 2018) — verifying vs. constructive traces, early cutoff
+9. **CloudBuild** (Esfahani et al., ICSE-SEIP 2016) — content hashing with trust-after-verification
+10. **tup: Build System Rules and Algorithms** (Shal, 2009) — change-driven rebuild cost model
+11. **racy-git** (Git technical documentation) — coarse filesystem timestamps and racily-clean index entries
 
 ## Contact & Contribution
 
